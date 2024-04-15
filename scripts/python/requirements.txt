@@ -101,3 +101,4 @@ xmltodict
 yapf
 yq
 zxcvbn
+yt-dlp>=2024.4.9 # not directly required, pinned by Snyk to avoid a vulnerability
