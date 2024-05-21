@@ -2,3 +2,4 @@ jupyter
 # qtconsole
 # use `conda install -y qtconsole`
 jupyter_kernel_gateway
+requests>=2.32.0 # not directly required, pinned by Snyk to avoid a vulnerability
