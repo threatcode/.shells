@@ -102,3 +102,4 @@ yapf
 yq
 zxcvbn
 twisted>=23.10.0rc1 # not directly required, pinned by Snyk to avoid a vulnerability
+starlette>=0.40.0 # not directly required, pinned by Snyk to avoid a vulnerability
