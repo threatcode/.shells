@@ -104,3 +104,5 @@ zxcvbn
 twisted>=23.10.0rc1 # not directly required, pinned by Snyk to avoid a vulnerability
 tornado>=6.4.2 # not directly required, pinned by Snyk to avoid a vulnerability
 setuptools>=70.0.0 # not directly required, pinned by Snyk to avoid a vulnerability
+starlette>=0.47.2 # not directly required, pinned by Snyk to avoid a vulnerability
+yt-dlp>=2025.7.21 # not directly required, pinned by Snyk to avoid a vulnerability
