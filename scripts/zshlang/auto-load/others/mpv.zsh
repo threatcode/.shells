@@ -48,13 +48,13 @@ function h_mpv-args {
             if test -z "$first" ; then
                 first="${i:t}"
             fi
-            args+="$(grealpath --canonicalize-existing -- "$i")"
+            args+="$(grealpath --canonicalize-existing -- "$i")" @TRET
         else
             args+="$i"
         fi
     done
 
-    tty-title "$first"
+    tty-title "$first" || true
 }
 
 
@@ -75,7 +75,7 @@ function mpv {
     fi
 
     local args=()
-    h_mpv-args "$@" @RET
+    assert h_mpv-args "$@" @RET
     set --
 
     revaldbg $proxyenv command-mpv $opts[@] --sub-auto=fuzzy --fs --input-ipc-server="$mpv_ipc" "${(@)args}"
@@ -103,21 +103,32 @@ function hear-seek-begin {
     hear-do seek 0 absolute-percent
 }
 ##
-function hear-get {
-    local prop="${1:-path}"
+function h-mpv-get-prop {
+    local ipc_do_cmd="$1"
+    local prop="${2:-path}"
 
     local res
-    res="$(hear-do get_property "$prop" | jq --raw-output -e .data)" @RET
+    res="$($ipc_do_cmd get_property "$prop")" @TRET
+    res="$(ec "${res}" | jq --raw-output -e .data)" || {
+        ecerr "$0: Failed to parse JSON response for property '$prop':"$'\n'"$res"
+        return 1
+    }
 
     if [[ "$prop" == 'path' ]] ; then
         res="$(ntag-recoverpath "$res")" @STRUE
     fi
 
-    ec "$res"
+    ec "$res" |
+        cat-copy-rtl-if-tty
 }
 
+function hear-get {
+    h-mpv-get-prop hear-do "${@}"
+}
+alias 'hgg'=hear-get
+
 function mpv-get {
-    mpv-do get_property "${1:-path}" | jq --raw-output -e .data
+    h-mpv-get-prop mpv-do "${@}"
 }
 ##
 function mpv-do {
@@ -126,9 +137,30 @@ function mpv-do {
     local cmd
     cmd="$(arrJ "$@")" @RET
 
-    mpv-rpc "$cmd"
+    local res
+    res="$(revaldbg mpv-rpc "$cmd")" @TRET
+    res="$(ec "${res}" | jq .)" || {
+        ecerr "$0: Failed to parse JSON response:"$'\n'"$res"
+        return 1
+    }
+
+    err="$(ec "${res}" | jq -re .error)" || {
+        ecerr "$0: failed to get error:"$'\n'"$res"
+        return 1
+    }
+
+    if [[ "$err" == "success" ]] ; then
+        ec "${res}"
+
+        return 0
+    else
+        ecerr "$0: error: ${err}"
+
+        return 1
+    fi
 }
-function mpv-rpc () {
+
+function mpv-rpc {
     local soc="${mpv_rpc_socket:-$mpv_ipc}" cmd="$1"
     assert-args soc cmd @RET
     assert test -e "$soc" @RET
@@ -143,8 +175,10 @@ function mpv-rpc () {
     ec $cmd | socat - "$soc" | jq .
 }
 alias mpv-rpc-audio='mpv_rpc_socket="$mpv_audio_ipc" '
+aliasfn hear-rpc mpv-rpc-audio mpv-rpc
 aliasfn hear-do mpv-rpc-audio mpv-do
 
+aliasfn hear-shuffle hear-do playlist-shuffle
 aliasfn mpv-play-toggle mpv-do keypress space
 aliasfn hear-play-toggle hear-do keypress space
 aliasfn hear-play-on hear-do set pause no
@@ -156,29 +190,66 @@ aliasfn hear-shuffle hear-do playlist-shuffle # or just press 'k'
 
 function hear-loadfile {
     local url="$1"
-    local mode="${mpv_loadfile_mode:-replace}"
+    local mode="${2:-${mpv_load_mode:-replace}}"
+    local opts=( "${@:3}" )
     #: * =replace=: Stop playback of the current file, and play the new file immediately.
     #: * =append-play=: Append the file, and if nothing is currently playing, start playback. (Always starts with the added file, even if the playlist was not empty before running this command.) This will not skip the currently playing file.
     #: * =append=: Append the file to the playlist.
     #:
     #: The append modes add all the other files of the dir to the playnext, too (possibly because of my scripts).
+    local mpv_command="${mpv_load_command:-loadfile}"
 
     assert-args url
     if test -e "$url" ; then
-        url="$(grealpath "$url")" @TRET
+        url="$(grealpath -- "$url")" @TRET
     fi
 
-    revaldbg hear-do loadfile "${url}" "$mode"
+    if [[ "${mpv_command}" == 'loadfile' ]] ; then
+        reval-ecgray hear-autoload-enable
+    fi
+
+    revaldbg hear-do "${mpv_command}" "${url}" "$mode" "${opts[@]}"
     revaldbg hear-play-on
 }
 aliasfn hear-open hear-loadfile
+aliasfn hlo hear-loadfile
 aliasfn mpv-loadfile fnswap hear-do mpv-do hear-loadfile
 aliasfn mpv-open mpv-loadfile
 
+function mpv-script-message-to {
+    local script="$1" msg="$2"
+    assert-args script msg @RET
+    mpv-rpc "$(jq -nc --arg script "$script" --arg msg "$msg" '["script-message-to", $script, $msg]')"
+}
+aliasfn hear-script-message-to mpv-rpc-audio mpv-script-message-to
+
+aliasfn mpv-autoload-enable mpv-script-message-to autoload enable
+aliasfn mpv-autoload-disable mpv-script-message-to autoload disable
+aliasfn hear-autoload-enable mpv-rpc-audio mpv-autoload-enable
+aliasfn hear-autoload-disable mpv-rpc-audio mpv-autoload-disable
+
+function hear-load-playlist {
+    {
+        reval-ecgray hear-autoload-disable
+        sleep 0.2 #: to make =hear-autoload-disable= take effect
+        mpv_load_command=loadlist reval-ecgray hear-loadfile "$@"
+        sleep 0.2 && revaldbg hear-seek-begin
+    } always {
+        #: We can't re-enable =autoload=, or it will autoload files when the next file in the playlist is opened.
+        # awaysh eval 'sleep 1 ;  hear-autoload-enable'
+    }
+}
+
+
 function hear-loadfile-begin {
     hear-loadfile "$@" @RET
-    sleep 0.2 && #: @raceCondition can't seek until the file has been loaded; @alt retry until success after smaller delay
-        revaldbg hear-seek-begin
+    if true ; then
+        retry_sleep=0.05 retry-limited 100 hear-seek-begin
+    else
+        #: @deprecated
+        sleep 0.3 && #: @raceCondition can't seek until the file has been loaded
+            revaldbg hear-seek-begin
+    fi
 }
 ###
 function play-and-trash(){
@@ -215,18 +286,20 @@ Searches Youtube and plays the result as audio." MAGIC
 
     mpv --ytdl-format=bestaudio ytdl://ytsearch:"$*"
 }
-function mpv-cache() {
+
+function mpv-cache {
     mpv --force-seekable=yes --cache=yes --cache-secs=99999999 "$@"
 }
-function mpv-stream() {
-    local file="$(realpath "$@[-1]")"
+
+function mpv-stream {
+    local file="$(grealpath -- "$@[-1]")"
     local opts=( "${@[1,-2]}" )
     # cache has been disabled in mpv.conf
     mpv_streaming=y mpv-notag $opts[@] appending://"$file"
 }
 aliasfn mpvs mpv-stream
 ##
-function retry-mpv() {
+function retry-mpv {
     # retry-eval "sleep 5 ; mpv --quiet $@ |& tr '\n' ' ' |ggrep -v 'Errors when loading file'"
     retry mpv-partial "${(Q)@}"
 }
@@ -252,8 +325,8 @@ function playtmp() {
     pat ~/tmp/delme/"$1:t"
 }
 
-function mpv-imgseq() {
-    mpv "mf://*.png" --mf-fps 30
+function mpv-imgseq {
+    mpv "mf://*.png" --mf-fps=30
 }
 aliasfn mpvi mpv-imgseq
 ##
@@ -288,6 +361,7 @@ function mpv-bookmark-cleanup {
 }
 
 function mpv-bookmark-fz {
+    local engine=("${mpv_bookmark_engine:-mpv}")
     local bookmark_file="${mpv_bookmarks}"
 
     local bookmarks
@@ -306,7 +380,28 @@ function mpv-bookmark-fz {
         ecerr "$0: multiple selections not supported"
     fi
 
-    reval-ec hear-noipc --start="${timestamps[1]}" "${files[1]}"
+    reval-ec "${engine}" --start="${timestamps[1]}" "${files[1]}"
+}
+
+function hear-bookmark-fz {
+    mpv_bookmark_engine=hear-noipc mpv-bookmark-fz "$@"
+}
+
+
+function h-hear-bookmark-loader {
+    # usage: h-hear-bookmark-loader --start=<time> <file>
+    local start_arg="$1"
+    local file="$2"
+
+    local time="${start_arg#--start=}"
+    #: `#`: The smallest matching pattern is deleted.
+    #: [[id:88424c96-3482-4ed1-8178-6cb31240a041]]
+
+    hear-loadfile "$file" "replace" "start=$time"
+}
+
+function hlo-bookmark-fz {
+    mpv_bookmark_engine=h-hear-bookmark-loader mpv-bookmark-fz "$@"
 }
 ##
 function mpv-tui {
@@ -314,4 +409,13 @@ function mpv-tui {
 
     mpv-notag --profile=sw-fast --vo=tct "$@"
 }
+##
+function mpv-cheatsheet {
+    icat "${nightNotesPublic}/cheatsheets/mpv/mpbindings_big.png"
+}
+##
+function mpv-progress {
+    mpv -osd-msg1='${osd-ass-cc/0}{\\pos(10,-6)}{\\fs15}${osd-sym-cc} {\\fs15}${time-pos} / ${playtime-remaining}    ${percent-pos}%' "$@"
+}
+alias m='mpv-progress'
 ##
